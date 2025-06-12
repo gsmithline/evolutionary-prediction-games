@@ -6,7 +6,7 @@ Comments are welcome!
 
 Analysis and simulations:
 ```
-conda create -n evoml anaconda conda-forge::cvxpy
+conda create -n evoml anaconda conda-forge::cvxpy conda-forge::mpltern
 ```
 
 Experiments with CIFAR-10/MNIST:

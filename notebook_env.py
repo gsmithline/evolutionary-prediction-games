@@ -8,7 +8,10 @@ import matplotlib.pyplot as plt
 import matplotlib
 plt.rcParams.update({
     'text.usetex': True,
-    'text.latex.preamble': r'\usepackage{amsmath,amsfonts,amssymb,bm}',
+    'text.latex.preamble': r'''
+    \usepackage{amsmath,amsfonts,amssymb,bm}
+    \newcommand{\vp}{\bm{p}}
+    ''',
 })
 
 import matplotlib_inline

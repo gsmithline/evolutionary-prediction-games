@@ -102,10 +102,20 @@ def plot_pdf_flat_support(X, Y, pdf, support_level, ax, color, **kwargs):
         **kwargs,
     )
 
-def plot_population_distribution(pop, ax, random_state, extent=None):
+def plot_population_distribution(pop, ax, *, random_state, mixture_kwargs={}, extent=None):
     markers = ['o','s','^']
+    p = mixture_kwargs.pop('p',np.ones(pop.n_groups)/pop.n_groups)
+    mixture_data = pop.sample_from_mixture(
+        **(
+            dict(
+                n=200,
+                p=p,
+                random_state=random_state,
+            ) | mixture_kwargs
+        ),
+    )
     plot_classification_2d_scatter(
-        *pop.sample_from_uniform_mixture(n=200, random_state=random_state),
+        *mixture_data,
         ax=ax,
         alpha=0.7,
         markers=markers,
@@ -125,7 +135,7 @@ def plot_population_distribution(pop, ax, random_state, extent=None):
             np.linspace(extent[0], extent[1], 200),
             np.linspace(extent[2], extent[3], 200),
         )
-    for g in pop.groups:
+    for i,g in enumerate(pop.groups):
         pdf = g.pdf(np.dstack(X_grid))
         for y in [0,1]:
             plot_pdf_flat_support(
@@ -133,7 +143,10 @@ def plot_population_distribution(pop, ax, random_state, extent=None):
                 pdf=pdf[y],
                 support_level=0.9,
                 ax=ax,
-                color=(classification_y_colors[y],0.3),
+                color=(
+                    classification_y_colors[y],
+                    0.3*(p[i]/max(p)),
+                ),
                 # alpha=0.5,
                 zorder=-1,
             )
@@ -175,7 +188,7 @@ def plot_population_game(game_df, ax, *, legend=False, equilibria={}, equilibria
             [
                 r'$\mathrm{acc}_A$',
                 r'$\mathrm{acc}_B$',
-                r'$\mathrm{acc}_\mathbf{p}$',
+                r'$\mathrm{acc}_\vp$',
             ],
             **legend_kwargs,
         )
@@ -234,11 +247,10 @@ def autoscale_turned_off(ax=None):
   ax.set_xlim(*lims[0])
   ax.set_ylim(*lims[1])
 
-def plot_population_game_xphase(ax, equilibria, d=0.05):
-    markersize = 3.5
+def plot_population_game_xphase(ax, equilibria, d=0.05, markersize=3.5, additional_markers={}):
     with autoscale_turned_off(ax=ax):
         y = ax.get_ylim()[0]
-        for x,is_stable in equilibria:
+        for i,(x,is_stable) in enumerate(equilibria):
             ax.plot(
                 x,y,
                 'o',
@@ -248,12 +260,17 @@ def plot_population_game_xphase(ax, equilibria, d=0.05):
                 markeredgecolor='black',
                 markersize=markersize,
             )
-            for i, x_marker in enumerate([x-d,x+d]):
+            marker_points = [x-d,x+d]
+            markers = (
+                {x_marker: ['>','<'][is_stable ^ (x_marker<x)] for x_marker in marker_points}
+                | additional_markers
+            )
+            for x_marker, symbol in markers.items():
                 if x_marker>=1 or x_marker<=0:
                     continue
                 ax.plot(
                     x_marker,y,
-                    marker=['<','>'][(i+is_stable)%2],
+                    marker=symbol,
                     clip_on=False,
                     zorder=100,
                     color='black',
