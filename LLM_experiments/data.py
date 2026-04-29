@@ -20,8 +20,14 @@ from folktexts.acs import ACSDataset
 STATES = ("CA", "NY", "TX")
 STATE_FIPS = {"CA": 6, "NY": 36, "TX": 48}
 K = len(STATES)
-DEFAULT_HELDOUT_PER_STATE = 5000 
+DEFAULT_HELDOUT_PER_STATE = 5000
 DEFAULT_YEAR = "2018"
+
+# Fixed seed for the train/test partition so the π_ref cache (which is keyed
+# only by model name) is valid across all experiment seeds. Replicator-level
+# randomness comes from `run_replicator(seed=...)`; the `seed` arg below is
+# kept for API compatibility but is intentionally unused for partitioning.
+PARTITION_SEED = 42
 
 
 @dataclass
@@ -42,7 +48,7 @@ def load_acs_income_3state(
     data_dir: str | Path,
     n_test_per_state: int = DEFAULT_HELDOUT_PER_STATE,
     year: str = DEFAULT_YEAR,
-    seed: int = 0,
+    seed: int = 0,  # noqa: ARG001  — kept for API compat; partition uses PARTITION_SEED
     max_train_per_state: int | None = None,
 ) -> ACSIncome3State:
     """Load ACSIncome via folktexts and partition by state.
@@ -50,14 +56,19 @@ def load_acs_income_3state(
     folktexts goes through folktables to download/cache ACS PUMS into
     `data_dir`/folktables. We then attach the state code from the full ACS
     frame and partition into per-state train/test pools.
+
+    The partition is deterministic across replicator seeds: we use
+    `PARTITION_SEED` (42) for both the folktexts internal RNG and our own
+    `rng.permutation(len(sub))` calls. This keeps the π_ref cache valid for
+    every experiment seed.
     """
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(PARTITION_SEED)
     Path(data_dir).mkdir(parents=True, exist_ok=True)
     ds = ACSDataset.make_from_task(
         task="ACSIncome",
         cache_dir=str(data_dir),
         survey_year=year,
-        seed=seed,
+        seed=PARTITION_SEED,
     )
 
     parsed = ds.data
