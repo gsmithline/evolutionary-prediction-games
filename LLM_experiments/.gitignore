@@ -1,0 +1,13 @@
+# local caches and run artifacts
+_data/
+_pi_ref/
+_results/
+_sft_round_tmp/
+__pycache__/
+*.pyc
+
+# condor runtime
+condor/logs/
+
+# wandb
+wandb/

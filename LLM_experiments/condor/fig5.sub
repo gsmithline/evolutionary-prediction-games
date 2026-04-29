@@ -1,0 +1,36 @@
+# Fig.5 LLM redo — one sub file, parameterized by (tag, policy, beta, seed).
+# Submit:
+#   condor_submit_bid 15 LLM_experiments/condor/fig5.sub
+# Pick which sweep by editing the `queue ... from` line at the bottom.
+#
+# Resource sizing assumes Qwen2.5-0.5B full-FT (fits comfortably under 24GB).
+# For 7B, copy this file and bump request_memory + GPU memory threshold; see
+# Opinion-dynamics-post-training/condor/llm_sweep_7b_fullft.sub for the pattern.
+
+universe          = vanilla
+executable        = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/run_one.sh
+arguments         = $(tag) $(policy) $(beta) $(seed)
+
+request_cpus      = 4
+request_memory    = 32G
+request_disk      = 30G
+request_gpus      = 1
+requirements      = (TARGET.CUDAGlobalMemoryMb >= 24000)
+
+getenv            = False
+environment       = "HF_HOME=/is/cluster/gsmithline/.cache/huggingface REPO=/home/gsmithline/evolutionary-prediction-games CONDA_SH=/home/gsmithline/miniconda3/etc/profile.d/conda.sh ENV_NAME=opdyn WANDB_KEY_FILE=/home/gsmithline/.wandb_key WANDB_PROJECT=epg-llm-fig5 T=600 N_PER_STEP=1000 BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct SFT_EPOCHS=1 BATCH_SIZE=4 GRAD_ACCUM=1 OPTIMIZER=adamw_torch DATA_DIR=/is/cluster/gsmithline/folktexts_data PI_REF_DIR=/is/cluster/gsmithline/folktexts_pi_ref"
+
+output            = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).out
+error             = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).err
+log               = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).log
+
+notification      = Complete
+notify_user       = gabriel.smithline@tue.ellis.eu
+
+max_retries       = 1
+on_exit_hold      = (ExitCode =!= 0)
+
+# Pick the sweep here:
+queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_static.txt
+# queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_closedform.txt
+# queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_sft.txt
