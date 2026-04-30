@@ -335,6 +335,7 @@ class SFTPolicy:
             max_length=self._max_length,
             bf16=True,
             optim=self.optimizer,
+            remove_unused_columns=False,
         )
         # Fresh-each-round semantics: reset trainable weights to π_ref before
         # this round's optimization. Optimizer state is already fresh because
