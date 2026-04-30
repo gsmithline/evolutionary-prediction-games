@@ -588,6 +588,7 @@ class RLKLPolicy:
             max_length=self._max_length,
             bf16=True,
             optim=self.optimizer,
+            remove_unused_columns=False,
         )
 
         collator = ManualMaskCollator(pad_token_id=self.tokenizer.pad_token_id)
