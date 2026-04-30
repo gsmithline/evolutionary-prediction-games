@@ -46,6 +46,7 @@ except Exception as e:  # missing LaTeX, mpltern, or running outside repo root
 
 try:
     import mpltern  # noqa: F401
+    from mpltern.datasets import get_triangular_grid
     _HAVE_MPLTERN = True
 except ImportError:
     _HAVE_MPLTERN = False
@@ -53,6 +54,20 @@ except ImportError:
 
 # Match Fig.5's right-panel palette in the paper.
 GROUP_COLORS_3 = {"CA": "tab:cyan", "NY": "tab:green", "TX": "tab:orange"}
+
+
+def _static_replicator_field(acc_per_group: np.ndarray, *, n: int = 21):
+    """Return (P, acc_p, replicator_f) on a triangular grid for a static policy.
+
+    P has shape (3, M) with rows indexed (TX, NY, CA) to match the panel layout.
+    acc_per_group must be in the same (TX, NY, CA) order. acc_p is the
+    population-weighted accuracy at each grid point; replicator_f[k, m] is
+    p_k * (acc_k - acc_p[m]) — the replicator vector at that grid point.
+    """
+    P = np.asarray(get_triangular_grid(n=n))  # (3, M), each column sums to 1.
+    acc_p = (P * acc_per_group[:, None]).sum(axis=0)
+    replicator_f = P * (acc_per_group[:, None] - acc_p[None, :])
+    return P, acc_p, replicator_f
 
 
 def _trajectory_to_pivots(traj: pd.DataFrame):
@@ -64,7 +79,7 @@ def _trajectory_to_pivots(traj: pd.DataFrame):
     return pivot_p[cols], pivot_acc[cols], pivot_fit[cols]
 
 
-def make_fig5(traj: pd.DataFrame, *, title_suffix: str = "", figsize=(11, 3.4)):
+def make_fig5(traj: pd.DataFrame, *, title_suffix: str = "", figsize=(13.5, 4.0)):
     pivot_p, pivot_acc, pivot_fit = _trajectory_to_pivots(traj)
 
     # mpltern is part of the evoml env; if unavailable we draw a plain p_min(t)
@@ -79,23 +94,45 @@ def make_fig5(traj: pd.DataFrame, *, title_suffix: str = "", figsize=(11, 3.4)):
         width_ratios=[1.1, 1.5, 1.5],
     )
 
-    # ---- Left panel: ternary trajectory (or fallback) ----
+    # ---- Left panel: ternary trajectory + replicator vector field ----
     ax = axs["T"]
     if ternary_ok:
-        # mpltern.plot expects (top, left, right) coordinates. Match the paper's
-        # Fig.5 left: TX at the apex, NY on the left, CA on the right.
+        # Per-group accuracy under the static policy: mean over rows where the
+        # state was actually sampled (sample_count > 0). For non-static runs
+        # this estimate is along the trajectory only — the field below assumes
+        # a constant policy, so it is informative only for static.
+        valid = traj["sample_count"] > 0 if "sample_count" in traj.columns else traj["acc"].notna()
+        accs_by_state = traj[valid].groupby("state")["acc"].mean()
+        # Order (TX, NY, CA) to match the panel apex/left/right.
+        acc_per_group = np.array([accs_by_state["TX"], accs_by_state["NY"], accs_by_state["CA"]])
+        P, acc_p, rep_f = _static_replicator_field(acc_per_group, n=21)
+
+        potential = ax.tripcolor(*P, acc_p * 100, cmap="turbo", shading="gouraud", alpha=0.85)
+        # Scale arrows to the field's max magnitude so they are visible regardless
+        # of how small per-group accuracy differences are.
+        rep_norm = float(np.linalg.norm(rep_f, axis=0).max())
+        rep_scale = max(rep_norm * 6.0, 1e-6)
+        ax.quiver(*P, *rep_f, scale=rep_scale, clip_on=True, color="black", alpha=0.85, width=0.004)
+
+        cax = ax.inset_axes([1.18, 0.1, 0.045, 0.85], transform=ax.transAxes)
+        cbar = fig.colorbar(potential, cax=cax, format="{x:.0f}%")
+        cbar.set_label(r"$\mathrm{acc}_{\mathbf{p}}$", rotation=270, va="baseline", labelpad=10)
+
+        # Trajectory on top of the field.
         ax.plot(pivot_p["TX"], pivot_p["NY"], pivot_p["CA"], color="red",
                 linewidth=2.0, zorder=10)
-        # Mark the start (uniform 1/3,1/3,1/3) and the end.
         ax.scatter(pivot_p["TX"].iloc[0], pivot_p["NY"].iloc[0], pivot_p["CA"].iloc[0],
-                   color="black", marker="o", s=18, zorder=11)
+                   color="black", marker="o", s=22, zorder=11, edgecolors="white", linewidths=0.6)
         ax.scatter(pivot_p["TX"].iloc[-1], pivot_p["NY"].iloc[-1], pivot_p["CA"].iloc[-1],
-                   color="red", marker="X", s=36, zorder=11)
+                   color="red", marker="X", s=42, zorder=11, edgecolors="white", linewidths=0.6)
+
         ax.set_tlabel("TX"); ax.set_llabel("NY"); ax.set_rlabel("CA")
         ax.taxis.set_label_position("tick1")
         ax.laxis.set_label_position("tick1")
         ax.raxis.set_label_position("tick1")
-        ax.set_title("ACSIncome Replicator Dynamics")
+        for axname in ("t", "l", "r"):
+            getattr(ax, f"{axname}axis").set_ticks(np.linspace(0, 1, 6))
+        ax.set_title("Replicator Dynamics")
     else:
         ax.plot(pivot_p.index, pivot_p.min(axis=1), color="red", linewidth=2.0,
                 label="$\\min_k p_k$")
@@ -130,7 +167,7 @@ def make_fig5(traj: pd.DataFrame, *, title_suffix: str = "", figsize=(11, 3.4)):
                 linewidth=1.7, label=f"$\\mathrm{{acc}}_{{\\mathrm{{{state}}}}}$")
     acc_p = (pivot_p * pivot_acc).sum(axis=1)
     ax.plot(acc_p.index, acc_p, color="black", linestyle="--", linewidth=1.4,
-            label="$\\mathrm{acc}_{\\bm{p}}$")
+            label="$\\mathrm{acc}_{\\mathbf{p}}$")
     ax.set_xlabel("Time ($t$)")
     ax.set_ylabel("Classification accuracy")
     ax.set_title("Group Fitness Over Time")
