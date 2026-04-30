@@ -3,8 +3,8 @@
 Env-var driven (mirrors Opinion-dynamics-post-training/condor/run_one.sh →
 pokec_simulations.py pattern):
 
-    POLICY        = static | closed_form | sft
-    BETA          = float, KL anchor strength (closed_form, sft)
+    POLICY        = static | closed_form | sft | rl_kl
+    BETA          = float, KL anchor strength (closed_form, sft, rl_kl)
     SEED          = int
     T             = int, replicator steps (default 600)
     N_PER_STEP    = int (default 1000)
@@ -35,7 +35,7 @@ except ImportError:
 
 from .data import K, STATES, load_acs_income_3state
 from .llm_pi_ref import build_or_load_pi_ref
-from .policies import StaticThresholdPolicy, ClosedFormPolicy, SFTPolicy
+from .policies import StaticThresholdPolicy, ClosedFormPolicy, SFTPolicy, RLKLPolicy
 from .replicator import run_replicator
 
 
@@ -54,10 +54,10 @@ def _init_wandb(config: dict, run_tag: str):
 
     policy = config.get("policy", "")
     tags = [policy]
-    if policy == "sft":
-        sft_mode = "continual" if config.get("sft_continual") else "fresh"
-        tags.append(f"sft-{sft_mode}")
-        display_name = f"{run_tag}-{sft_mode}"
+    if policy in ("sft", "rl_kl"):
+        train_mode = "continual" if config.get("sft_continual") else "fresh"
+        tags.append(f"{policy}-{train_mode}")
+        display_name = f"{run_tag}-{train_mode}"
     else:
         display_name = run_tag
 
@@ -148,6 +148,17 @@ def main():
         policy = ClosedFormPolicy(beta=beta)
     elif policy_kind == "sft":
         policy = SFTPolicy(
+            base_model=base_model,
+            beta=beta,
+            folktexts_dataset=data.folktexts_dataset,
+            sft_epochs=config["sft_epochs"],
+            batch_size=config["batch_size"],
+            grad_accum=config["grad_accum"],
+            optimizer=config["optimizer"],
+            continual=sft_continual,
+        )
+    elif policy_kind == "rl_kl":
+        policy = RLKLPolicy(
             base_model=base_model,
             beta=beta,
             folktexts_dataset=data.folktexts_dataset,

@@ -34,3 +34,4 @@ on_exit_hold      = (ExitCode =!= 0)
 queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_static.txt
 # queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_closedform.txt
 # queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_sft.txt
+# queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_rlkl.txt

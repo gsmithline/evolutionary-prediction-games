@@ -1,4 +1,4 @@
-"""The three classifier conditions for the Fig. 5 redo.
+"""Classifier conditions for the Fig. 5 redo.
 
 Each policy exposes:
     fit(sample) -> None        # called once per replicator step on the population sample
@@ -7,6 +7,26 @@ Each policy exposes:
 A `SamplePack` carries the population-weighted sample's features, labels, and
 cached π_ref(y=1|x) values for those rows. `TestPack` is the per-state held-out
 analog. Cached π_ref values come from `llm_pi_ref.build_or_load_pi_ref`.
+
+The four conditions correspond to four KL-anchored learning regimes:
+
+* `StaticThresholdPolicy` — frozen LLM, threshold tuned on the population sample.
+  No training; baseline for "what does the unmodified prior do."
+
+* `ClosedFormPolicy` — analytical optimum of Korbak-Williams form (II) KL-RL:
+  π_θ*(y|x) ∝ π_ref(y|x) · h_p(y|x)^(1/β), where h_p is a logreg head fit on
+  the population. No gradient descent; closed form via geometric mixture.
+
+* `SFTPolicy` — gradient descent on form (I), MLE + KL: minimizes
+  −log p_θ(y_obs|x) + β·KL(p_θ||π_ref). Standard "SFT-with-KL" practitioner loss.
+  Note: NOT the same objective as form (II); use this as a baseline rather than
+  as a gradient-descent realization of the closed_form geometric mixture.
+
+* `RLKLPolicy` — gradient descent on form (II), Korbak-Williams KL-RL: minimizes
+  −E_{y~q'_θ(·|x)}[log h_p(y|x)] + β·KL_2(q'_θ||π_ref') on the 2-class
+  restricted softmax q' over {pos_token, neg_token}. Same objective as the
+  closed_form analytical optimum; agreement between the two pins down
+  optimizer / capacity gaps.
 """
 from __future__ import annotations
 
@@ -23,7 +43,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 from trl import SFTConfig
-from .sft_kl_trainer import KLSFTTrainer
+from .sft_kl_trainer import KLSFTTrainer, RLKLSFTTrainer
 
 from . import _folktexts_compat  # noqa: F401  — must precede folktexts imports
 from folktexts.classifier import TransformersLLMClassifier
@@ -357,6 +377,247 @@ class SFTPolicy:
                 print(f"[sft-sanity] last 12 labels   : {lb[-12:].tolist()}")
             except Exception as e:
                 print(f"[sft-sanity] check failed: {e}")
+            self._sanity_done = True
+
+        trainer.train()
+
+    def score(self, test: TestPack) -> float:
+        clf = self._build_clf()
+        risk = clf.predict_proba(test.X)
+        pred = (risk[:, 1] >= 0.5).astype(np.int64)
+        return float((pred == test.y).mean())
+
+
+# ---------------------------------------------------------------------------
+# Condition D — full FT base LLM, KL-RL form (II) gradient descent.
+# Reward model is a logreg head fit per replicator step (matches ClosedForm).
+# ---------------------------------------------------------------------------
+
+class RLKLPolicy:
+    """Form (II) gradient-descent realization of the Korbak-Williams KL-RL optimum.
+
+    Per replicator step:
+        1. Fit a reward model h_p (logreg) on the population sample.
+        2. Build a SFT-style dataset; each example carries
+              log_reward_pos = log h_p(y=1|x)
+              log_reward_neg = log h_p(y=0|x).
+        3. Train the LLM with `RLKLSFTTrainer`, minimizing
+              -E_{y~q'_θ(·|x)}[log h_p(y|x)] + β · KL_2(q'_θ || π_ref')
+           on the 2-class restricted softmax q' over the two answer tokens.
+
+    The trainer's optimum is the same geometric mixture computed analytically
+    by `ClosedFormPolicy`, so the two should agree at convergence. Defaults
+    mirror `SFTPolicy` (continual=True, 1 epoch per round, full FT).
+    """
+
+    name = "rl_kl"
+
+    def __init__(
+        self,
+        base_model: str,
+        beta: float,
+        folktexts_dataset,
+        sft_epochs: int = 1,
+        batch_size: int = 4,
+        grad_accum: int = 1,
+        learning_rate: float = 2e-5,
+        optimizer: str = "adamw_torch",
+        continual: bool = True,
+        head_kind: str = "logreg",
+        eps: float = 1e-9,
+    ):
+        if beta <= 0:
+            raise ValueError("RLKLPolicy requires beta > 0; β=0 limit is unregularized.")
+        self.base_model = base_model
+        self.beta = float(beta)
+        self.folktexts_dataset = folktexts_dataset
+        self.sft_epochs = sft_epochs
+        self.batch_size = batch_size
+        self.grad_accum = grad_accum
+        self.learning_rate = learning_rate
+        self.optimizer = optimizer
+        self.continual = bool(continual)
+        self.head_kind = head_kind
+        self.eps = float(eps)
+        self._max_length = 512
+        self.head: Optional[Pipeline] = None
+        self._init_model_lazy()
+        self._answer_tokens = self._compute_answer_tokens()
+
+    def _init_model_lazy(self):
+        cuda = torch.cuda.is_available()
+        dtype = torch.bfloat16 if cuda else torch.float32
+        self.tokenizer = AutoTokenizer.from_pretrained(self.base_model)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        common = dict(torch_dtype=dtype)
+        if cuda:
+            common["device_map"] = "auto"
+
+        self.model = AutoModelForCausalLM.from_pretrained(self.base_model, **common)
+        self.ref_model = AutoModelForCausalLM.from_pretrained(self.base_model, **common)
+        for p in self.ref_model.parameters():
+            p.requires_grad_(False)
+        self.ref_model.eval()
+
+    def _compute_answer_tokens(self) -> dict[int, list[int]]:
+        """Encode the leading-space answer keys for both classes once."""
+        task = self.folktexts_dataset.task
+        qa = task.multiple_choice_qa
+        if qa is None:
+            raise RuntimeError("Task lacks a multiple-choice QA interface.")
+        out: dict[int, list[int]] = {}
+        for cls in (0, 1):
+            key = qa.get_answer_key_from_value(int(cls))
+            ids = self.tokenizer.encode(" " + key, add_special_tokens=False)
+            if len(ids) != 1:
+                raise RuntimeError(
+                    f"RLKLPolicy currently supports single-token answers; got "
+                    f"len={len(ids)} for class={cls} key={key!r} ids={ids}."
+                )
+            out[cls] = ids
+        return out
+
+    def _build_head(self):
+        if self.head_kind == "logreg":
+            return Pipeline([
+                ("scale", StandardScaler(with_mean=False)),
+                ("clf", LogisticRegression(max_iter=200, n_jobs=1)),
+            ])
+        raise NotImplementedError(self.head_kind)
+
+    def _build_clf(self):
+        return TransformersLLMClassifier(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            task=self.folktexts_dataset.task,
+            batch_size=self.batch_size,
+            correct_order_bias=False,
+        )
+
+    def _make_dataset(self, sample: SamplePack, h_pos: np.ndarray):
+        """Build a HF Dataset with masked prompt + per-row log-reward fields.
+
+        h_pos[i] = h_p(y=1 | x_i), the reward model's positive-class probability.
+        Each example carries:
+            input_ids, attention_mask, labels (same as SFTPolicy)
+            log_reward_pos = log h_pos[i]
+            log_reward_neg = log (1 - h_pos[i])
+        """
+        task = self.folktexts_dataset.task
+        qa = task.multiple_choice_qa
+        if qa is None:
+            raise RuntimeError("Task lacks a multiple-choice QA interface.")
+
+        max_len = self._max_length
+        examples = []
+        boundary_failures = 0
+        for ((_, row), yi, hp) in zip(sample.X.iterrows(), sample.y, h_pos):
+            prompt = encode_row_prompt(row, task)
+            answer_key = qa.get_answer_key_from_value(int(yi))
+
+            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+            answer_ids = self.tokenizer.encode(" " + answer_key, add_special_tokens=False)
+
+            joint_ids = self.tokenizer.encode(prompt + " " + answer_key, add_special_tokens=False)
+            if joint_ids != prompt_ids + answer_ids:
+                boundary_failures += 1
+                if joint_ids[-len(answer_ids):] == answer_ids:
+                    prompt_ids = joint_ids[:-len(answer_ids)]
+                else:
+                    raise RuntimeError(
+                        f"Tokenization boundary ambiguous for answer={answer_key!r}; "
+                        f"separate tokenization does not align with joint."
+                    )
+
+            input_ids = prompt_ids + answer_ids
+            if len(input_ids) > max_len:
+                cut = len(input_ids) - max_len
+                prompt_ids = prompt_ids[cut:]
+                input_ids = prompt_ids + answer_ids
+            labels = [-100] * len(prompt_ids) + list(answer_ids)
+
+            hp_clip = float(np.clip(hp, self.eps, 1.0 - self.eps))
+            examples.append({
+                "input_ids": input_ids,
+                "attention_mask": [1] * len(input_ids),
+                "labels": labels,
+                "log_reward_pos": float(np.log(hp_clip)),
+                "log_reward_neg": float(np.log(1.0 - hp_clip)),
+            })
+
+        if boundary_failures and not getattr(self, "_warned_boundary", False):
+            print(f"[RLKLPolicy] tokenization boundary recovered for {boundary_failures} examples "
+                  f"(BPE merge across prompt/answer join).")
+            self._warned_boundary = True
+
+        return Dataset.from_list(examples)
+
+    def fit(self, sample: SamplePack) -> None:
+        # 1. Fit the reward model on the population sample.
+        if len(np.unique(sample.y)) < 2:
+            # Degenerate single-class round: fall back to a "dummy head" that
+            # predicts the observed class. The KL term still pulls the LM
+            # toward π_ref so this is still a valid update.
+            const = float(sample.y.mean())
+            h_pos = np.full(len(sample.y), const, dtype=np.float64)
+        else:
+            self.head = self._build_head()
+            self.head.fit(sample.X.values, sample.y)
+            h_pos = self.head.predict_proba(sample.X.values)[:, 1]
+
+        # 2. Build the dataset with per-row reward log-probs.
+        ds = self._make_dataset(sample, h_pos)
+
+        # 3. Continual vs. fresh-each-round semantics, identical to SFTPolicy.
+        if not self.continual:
+            self.model.load_state_dict(self.ref_model.state_dict())
+
+        report_to = "wandb" if os.environ.get("WANDB_API_KEY") else "none"
+        cfg = SFTConfig(
+            output_dir="./_rlkl_round_tmp",
+            per_device_train_batch_size=self.batch_size,
+            gradient_accumulation_steps=self.grad_accum,
+            num_train_epochs=self.sft_epochs,
+            learning_rate=self.learning_rate,
+            logging_steps=10,
+            save_strategy="no",
+            report_to=report_to,
+            completion_only_loss=False,
+            max_length=self._max_length,
+            bf16=True,
+            optim=self.optimizer,
+        )
+
+        collator = ManualMaskCollator(pad_token_id=self.tokenizer.pad_token_id)
+        trainer = RLKLSFTTrainer(
+            model=self.model,
+            processing_class=self.tokenizer,
+            args=cfg,
+            train_dataset=ds,
+            data_collator=collator,
+            kl_beta=self.beta,
+            ref_model=self.ref_model,
+            pos_token_id=self._answer_tokens[1][0],
+            neg_token_id=self._answer_tokens[0][0],
+        )
+
+        if os.environ.get("SFT_SANITY", "0") == "1" and not getattr(self, "_sanity_done", False):
+            try:
+                batch = next(iter(trainer.get_train_dataloader()))
+                lb = batch["labels"][0]
+                lr_pos = batch["log_reward_pos"][:4].tolist()
+                lr_neg = batch["log_reward_neg"][:4].tolist()
+                kept_pos = (lb != -100).nonzero(as_tuple=True)[0].tolist()
+                kept_ids = lb[lb != -100].tolist()
+                print(f"[rlkl-sanity] kept_positions={kept_pos} kept_ids={kept_ids}")
+                print(f"[rlkl-sanity] log_reward_pos[:4]={lr_pos}")
+                print(f"[rlkl-sanity] log_reward_neg[:4]={lr_neg}")
+                print(f"[rlkl-sanity] pos_token_id={self._answer_tokens[1][0]} "
+                      f"neg_token_id={self._answer_tokens[0][0]}")
+            except Exception as e:
+                print(f"[rlkl-sanity] check failed: {e}")
             self._sanity_done = True
 
         trainer.train()
