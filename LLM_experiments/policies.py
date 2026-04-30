@@ -190,6 +190,7 @@ class SFTPolicy:
         learning_rate: float = 2e-5,
         optimizer: str = "adamw_torch",
         continual: bool = True,
+        inference_batch_size: int = 64,
     ):
         """Default is **continual** SFT — weights persist across replicator
         rounds, β·KL anchor pulls toward π_ref each step. Matches the
@@ -210,6 +211,7 @@ class SFTPolicy:
         self.learning_rate = learning_rate
         self.optimizer = optimizer
         self.continual = bool(continual)
+        self.inference_batch_size = int(inference_batch_size)
         self._max_length = 512
         self._init_model_lazy()
 
@@ -235,13 +237,13 @@ class SFTPolicy:
         self.ref_model.eval()
 
     def _build_clf(self):
-       
+
         return TransformersLLMClassifier(
             model=self.model,
             tokenizer=self.tokenizer,
             task=self.folktexts_dataset.task,
-            batch_size=self.batch_size,
-            correct_order_bias=False, #set to trye to change the order correcting bias. 
+            batch_size=self.inference_batch_size,
+            correct_order_bias=False, #set to trye to change the order correcting bias.
         )
 
     def _make_dataset(self, sample: SamplePack):
@@ -426,6 +428,7 @@ class RLKLPolicy:
         continual: bool = True,
         head_kind: str = "logreg",
         eps: float = 1e-9,
+        inference_batch_size: int = 64,
     ):
         if beta <= 0:
             raise ValueError("RLKLPolicy requires beta > 0; β=0 limit is unregularized.")
@@ -440,6 +443,7 @@ class RLKLPolicy:
         self.continual = bool(continual)
         self.head_kind = head_kind
         self.eps = float(eps)
+        self.inference_batch_size = int(inference_batch_size)
         self._max_length = 512
         self.head: Optional[Pipeline] = None
         self._init_model_lazy()
@@ -493,7 +497,7 @@ class RLKLPolicy:
             model=self.model,
             tokenizer=self.tokenizer,
             task=self.folktexts_dataset.task,
-            batch_size=self.batch_size,
+            batch_size=self.inference_batch_size,
             correct_order_bias=False,
         )
 

@@ -16,6 +16,8 @@ pokec_simulations.py pattern):
     SFT_EPOCHS    = int (sft only, default 1)
     BATCH_SIZE    = int (sft only, default 4)
     GRAD_ACCUM    = int (sft only, default 1)
+    INFERENCE_BATCH_SIZE = int (sft / rl_kl only, default 64) — batch size for
+                  per-round LLM scoring (decoupled from training batch size).
     WANDB_PROJECT = str (default "epg-llm-fig5")
     WANDB_ENTITY  = str (optional, defaults to user's wandb default)
     WANDB_MODE    = "online" | "offline" | "disabled"
@@ -113,6 +115,7 @@ def main():
         "grad_accum": int(os.environ.get("GRAD_ACCUM", "1")),
         "optimizer": os.environ.get("OPTIMIZER", "adamw_torch"),
         "sft_continual": sft_continual,
+        "inference_batch_size": int(os.environ.get("INFERENCE_BATCH_SIZE", "64")),
     }
     print(f"[run_fig5] tag={run_tag} policy={policy_kind} beta={beta} seed={seed} T={T} n={n_per_step}")
     print(f"[run_fig5] base_model={base_model} data_dir={data_dir} pi_ref_dir={pi_ref_dir}")
@@ -156,6 +159,7 @@ def main():
             grad_accum=config["grad_accum"],
             optimizer=config["optimizer"],
             continual=sft_continual,
+            inference_batch_size=config["inference_batch_size"],
         )
     elif policy_kind == "rl_kl":
         policy = RLKLPolicy(
@@ -167,6 +171,7 @@ def main():
             grad_accum=config["grad_accum"],
             optimizer=config["optimizer"],
             continual=sft_continual,
+            inference_batch_size=config["inference_batch_size"],
         )
     else:
         print(f"[run_fig5] unknown POLICY={policy_kind}", file=sys.stderr)
