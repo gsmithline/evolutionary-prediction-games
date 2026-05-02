@@ -187,12 +187,15 @@ def main():
         wandb_mod.log(step_record)
 
     p0 = np.full(K, 1.0 / K)
+    out_path = results_dir / f"{run_tag}.csv"
     traj = run_replicator(
         policy=policy, data=data, pi_ref=pi_ref,
         p0=p0, T=T, n_per_step=n_per_step, seed=seed,
         on_step=wandb_step_log,
+        incremental_csv=out_path,
     )
-    out_path = results_dir / f"{run_tag}.csv"
+    # incremental_csv has already flushed the final trajectory; this re-write
+    # is harmless and keeps the existing log line stable.
     traj.to_csv(out_path, index=False)
     print(f"[run_fig5] wrote {out_path}")
 

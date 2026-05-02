@@ -12,6 +12,8 @@ so existing notebooks can plot the three Fig. 5 panels directly.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from time import perf_counter
 import numpy as np
 import pandas as pd
@@ -19,6 +21,14 @@ from tqdm.auto import tqdm
 
 from .data import STATES, K, ACSIncome3State, sample_from_mixture
 from .policies import SamplePack, TestPack
+
+
+def _atomic_write_csv(rows: list, path: Path) -> None:
+    """Overwrite path with rows, going through a tmp file + rename so a crash
+    mid-write can never leave a half-formed CSV."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    pd.DataFrame(rows).to_csv(tmp, index=False)
+    os.replace(tmp, path)
 
 
 def _build_sample_pack(data: ACSIncome3State, pi_ref: dict, df, group_labels, within_state_idx) -> SamplePack:
@@ -54,8 +64,13 @@ def run_replicator(
     n_per_step: int,
     seed: int,
     on_step=None,
+    incremental_csv: Path | str | None = None,
 ) -> pd.DataFrame:
     """Run the discrete replicator. Optionally invoke `on_step(record)` after each step.
+
+    If `incremental_csv` is provided, the partial trajectory is flushed to that
+    path after every round (atomic temp-file + rename). A crash at round k
+    leaves a CSV containing rows for t=0..k-1 instead of nothing.
 
     `record` is a flat dict with scalar values suitable for wandb.log:
       t, p/CA, p/NY, p/TX, p/min, p/entropy,
@@ -65,6 +80,10 @@ def run_replicator(
       sample_count/CA, sample_count/NY, sample_count/TX,
       threshold (if policy exposes one).
     """
+    incremental_path: Path | None = None
+    if incremental_csv is not None:
+        incremental_path = Path(incremental_csv)
+        incremental_path.parent.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
     p = np.asarray(p0, dtype=np.float64)
     if abs(p.sum() - 1.0) > 1e-6:
@@ -120,6 +139,9 @@ def run_replicator(
             })
         p = p_next
 
+        if incremental_path is not None:
+            _atomic_write_csv(rows, incremental_path)
+
     # Final population row, no acc.
     for k, state in enumerate(STATES):
         rows.append({
@@ -127,4 +149,8 @@ def run_replicator(
             "acc": np.nan, "fitness": np.nan,
             "sample_count": 0, "step_seconds": np.nan,
         })
+
+    if incremental_path is not None:
+        _atomic_write_csv(rows, incremental_path)
+
     return pd.DataFrame(rows)
