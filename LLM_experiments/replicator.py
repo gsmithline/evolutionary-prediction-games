@@ -15,6 +15,7 @@ from __future__ import annotations
 from time import perf_counter
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 from .data import STATES, K, ACSIncome3State, sample_from_mixture
 from .policies import SamplePack, TestPack
@@ -72,7 +73,7 @@ def run_replicator(
     test_packs = {state: _build_test_pack(data, pi_ref, state) for state in STATES}
 
     rows = []
-    for t in range(T):
+    for t in tqdm(range(T), desc="replicator", unit="round"):
         t0 = perf_counter()
         df, g, wsi = sample_from_mixture(data, p, n_per_step, rng)
         sample = _build_sample_pack(data, pi_ref, df, g, wsi)

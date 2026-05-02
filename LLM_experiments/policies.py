@@ -178,12 +178,19 @@ class _FastTestScorer:
 
     Keyed by `id(test_pack.X)`, which is stable when run_replicator builds
     test_packs once and reuses them every round.
+
+    The forward pass is chunked into `chunk_size` rows at a time so the
+    (chunk, seq, vocab) logits tensor stays small, even after Accelerate's
+    automatic fp32 conversion. Big-vocab models (Qwen 2.5: 152k, Gemma 2: 256k)
+    can otherwise OOM a 24 GB GPU on a 100-row pool when the SFT model's
+    optimizer state is also resident.
     """
 
-    def __init__(self, tokenizer, task, max_length: int = 512):
+    def __init__(self, tokenizer, task, max_length: int = 512, chunk_size: int = 16):
         self.tokenizer = tokenizer
         self.task = task
         self.max_length = int(max_length)
+        self.chunk_size = max(1, int(chunk_size))
         self._cache: dict[int, dict] = {}
 
     def _build(self, test_pack: "TestPack", device) -> dict:
@@ -211,24 +218,36 @@ class _FastTestScorer:
         if key not in self._cache:
             self._cache[key] = self._build(test_pack, device)
         cache = self._cache[key]
+        n = cache["input_ids"].shape[0]
         was_training = model.training
         model.eval()
+        pos_chunks: list[torch.Tensor] = []
+        neg_chunks: list[torch.Tensor] = []
         try:
             with torch.no_grad():
-                logits = model(
-                    input_ids=cache["input_ids"],
-                    attention_mask=cache["attention_mask"],
-                ).logits
-            last_logits = logits[
-                torch.arange(logits.shape[0], device=logits.device),
-                cache["last_idx"],
-            ]
-            pos = last_logits[:, pos_tok_id]
-            neg = last_logits[:, neg_tok_id]
+                for i in range(0, n, self.chunk_size):
+                    j = min(i + self.chunk_size, n)
+                    logits = model(
+                        input_ids=cache["input_ids"][i:j],
+                        attention_mask=cache["attention_mask"][i:j],
+                    ).logits
+                    last_logits = logits[
+                        torch.arange(logits.shape[0], device=logits.device),
+                        cache["last_idx"][i:j],
+                    ]
+                    # Clone the two scalars per row so we can free the big
+                    # (chunk, vocab) tensor on next iteration.
+                    pos_chunks.append(last_logits[:, pos_tok_id].detach().clone())
+                    neg_chunks.append(last_logits[:, neg_tok_id].detach().clone())
+                    del logits, last_logits
+            pos = torch.cat(pos_chunks)
+            neg = torch.cat(neg_chunks)
             pred = (pos > neg).cpu().numpy().astype(np.int64)
         finally:
             if was_training:
                 model.train()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         return float((pred == test_pack.y).mean())
 
 
