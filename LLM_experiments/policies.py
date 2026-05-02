@@ -166,6 +166,91 @@ class ClosedFormPolicy:
 
 
 # ---------------------------------------------------------------------------
+# Fast scorer: pre-tokenize the test pool once, batched forward pass per round.
+# folktexts' TransformersLLMClassifier.predict_proba re-encodes and re-tokenizes
+# the test pool on every call (Python-loop), costing ~10s per state per round.
+# This scorer caches per-test-pack tokenized tensors on device and reads logits
+# at the answer position for the two answer tokens directly.
+# ---------------------------------------------------------------------------
+
+class _FastTestScorer:
+    """Cached fast path for per-state test scoring during the replicator loop.
+
+    Keyed by `id(test_pack.X)`, which is stable when run_replicator builds
+    test_packs once and reuses them every round.
+    """
+
+    def __init__(self, tokenizer, task, max_length: int = 512):
+        self.tokenizer = tokenizer
+        self.task = task
+        self.max_length = int(max_length)
+        self._cache: dict[int, dict] = {}
+
+    def _build(self, test_pack: "TestPack", device) -> dict:
+        prompts = [
+            encode_row_prompt(row, self.task)
+            for _, row in test_pack.X.iterrows()
+        ]
+        enc = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+        )
+        last_idx = enc.attention_mask.sum(dim=-1) - 1
+        return {
+            "input_ids": enc.input_ids.to(device),
+            "attention_mask": enc.attention_mask.to(device),
+            "last_idx": last_idx.to(device),
+        }
+
+    def score(self, model, test_pack: "TestPack", pos_tok_id: int, neg_tok_id: int) -> float:
+        device = next(model.parameters()).device
+        key = id(test_pack.X)
+        if key not in self._cache:
+            self._cache[key] = self._build(test_pack, device)
+        cache = self._cache[key]
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                logits = model(
+                    input_ids=cache["input_ids"],
+                    attention_mask=cache["attention_mask"],
+                ).logits
+            last_logits = logits[
+                torch.arange(logits.shape[0], device=logits.device),
+                cache["last_idx"],
+            ]
+            pos = last_logits[:, pos_tok_id]
+            neg = last_logits[:, neg_tok_id]
+            pred = (pos > neg).cpu().numpy().astype(np.int64)
+        finally:
+            if was_training:
+                model.train()
+        return float((pred == test_pack.y).mean())
+
+
+def _compute_single_answer_tokens(tokenizer, task) -> dict[int, int]:
+    """Return {0: neg_tok_id, 1: pos_tok_id}; both must be single-token."""
+    qa = task.multiple_choice_qa
+    if qa is None:
+        raise RuntimeError("Task lacks a multiple-choice QA interface.")
+    out: dict[int, int] = {}
+    for cls in (0, 1):
+        key = qa.get_answer_key_from_value(int(cls))
+        ids = tokenizer.encode(" " + key, add_special_tokens=False)
+        if len(ids) != 1:
+            raise RuntimeError(
+                f"Fast scorer requires single-token answers; got len={len(ids)} "
+                f"for class={cls} key={key!r} ids={ids}."
+            )
+        out[cls] = ids[0]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Condition C — full FT base LLM with β·KL anchor toward π_ref
 # ---------------------------------------------------------------------------
 
@@ -235,6 +320,12 @@ class SFTPolicy:
         for p in self.ref_model.parameters():
             p.requires_grad_(False)
         self.ref_model.eval()
+        self._fast_scorer = _FastTestScorer(
+            self.tokenizer, self.folktexts_dataset.task, max_length=self._max_length,
+        )
+        self._answer_tok_id = _compute_single_answer_tokens(
+            self.tokenizer, self.folktexts_dataset.task,
+        )
 
     def _build_clf(self):
 
@@ -385,10 +476,11 @@ class SFTPolicy:
         trainer.train()
 
     def score(self, test: TestPack) -> float:
-        clf = self._build_clf()
-        risk = clf.predict_proba(test.X)
-        pred = (risk[:, 1] >= 0.5).astype(np.int64)
-        return float((pred == test.y).mean())
+        return self._fast_scorer.score(
+            self.model, test,
+            pos_tok_id=self._answer_tok_id[1],
+            neg_tok_id=self._answer_tok_id[0],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +540,9 @@ class RLKLPolicy:
         self.head: Optional[Pipeline] = None
         self._init_model_lazy()
         self._answer_tokens = self._compute_answer_tokens()
+        self._fast_scorer = _FastTestScorer(
+            self.tokenizer, self.folktexts_dataset.task, max_length=self._max_length,
+        )
 
     def _init_model_lazy(self):
         cuda = torch.cuda.is_available()
@@ -629,7 +724,8 @@ class RLKLPolicy:
         trainer.train()
 
     def score(self, test: TestPack) -> float:
-        clf = self._build_clf()
-        risk = clf.predict_proba(test.X)
-        pred = (risk[:, 1] >= 0.5).astype(np.int64)
-        return float((pred == test.y).mean())
+        return self._fast_scorer.score(
+            self.model, test,
+            pos_tok_id=self._answer_tokens[1][0],
+            neg_tok_id=self._answer_tokens[0][0],
+        )
