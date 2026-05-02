@@ -102,6 +102,7 @@ def main():
     # deployed-system semantics). SFT_FRESH=1 flips to RRM (fresh-each-round)
     # for theory comparison.
     sft_continual = os.environ.get("SFT_FRESH", "0") != "1"
+    prompt_format = os.environ.get("PROMPT_FORMAT", "flat")
     config = {
         "policy": policy_kind,
         "beta": beta,
@@ -116,8 +117,9 @@ def main():
         "optimizer": os.environ.get("OPTIMIZER", "adamw_torch"),
         "sft_continual": sft_continual,
         "inference_batch_size": int(os.environ.get("INFERENCE_BATCH_SIZE", "64")),
+        "prompt_format": prompt_format,
     }
-    print(f"[run_fig5] tag={run_tag} policy={policy_kind} beta={beta} seed={seed} T={T} n={n_per_step}")
+    print(f"[run_fig5] tag={run_tag} policy={policy_kind} beta={beta} seed={seed} T={T} n={n_per_step} prompt_format={prompt_format}")
     print(f"[run_fig5] base_model={base_model} data_dir={data_dir} pi_ref_dir={pi_ref_dir}")
 
     wandb_mod = _init_wandb(config, run_tag)
@@ -132,6 +134,7 @@ def main():
     pi_ref = build_or_load_pi_ref(
         data, model_name=base_model, cache_dir=pi_ref_dir,
         batch_size=int(os.environ.get("PI_REF_BATCH_SIZE", "16")),
+        prompt_format=prompt_format,
     )
 
     # Log per-state base-LLM (frozen-π_ref) baseline accuracy at threshold 0.5 to

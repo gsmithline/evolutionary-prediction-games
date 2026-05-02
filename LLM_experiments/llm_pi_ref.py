@@ -6,14 +6,19 @@ ClosedForm) read from this cache instead of re-querying the LLM each step.
 
 Cache layout:
   cache_dir/
-    {model_slug}/
+    {model_slug}[__chat]/
       {state}_train_p1.npy  # P(y=1 | x) under base LLM, shape (n_train,)
       {state}_train_y.npy   # ground-truth binary label, shape (n_train,)
       {state}_test_p1.npy
       {state}_test_y.npy
+
+The `__chat` suffix marks caches built with `prompt_format="chat"` (uses the
+model's chat template via folktexts.encode_row_prompt_chat). The default
+`prompt_format="flat"` matches folktexts' default flat completion-style prompt.
 """
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -22,14 +27,16 @@ from .data import STATES, ACSIncome3State
 from . import _folktexts_compat  # noqa: F401  — patches folktexts vocab-size bug
 from folktexts.llm_utils import load_model_tokenizer
 from folktexts.classifier import TransformersLLMClassifier
+from folktexts.prompting import encode_row_prompt_chat
 
 
 def _slug(model_name: str) -> str:
     return model_name.replace("/", "--")
 
 
-def cache_path(cache_dir: str | Path, model_name: str) -> Path:
-    return Path(cache_dir) / _slug(model_name)
+def cache_path(cache_dir: str | Path, model_name: str, prompt_format: str = "flat") -> Path:
+    suffix = "__chat" if prompt_format == "chat" else ""
+    return Path(cache_dir) / (_slug(model_name) + suffix)
 
 
 def _state_pool_concat(data: ACSIncome3State, state: str) -> tuple[pd.DataFrame, np.ndarray]:
@@ -55,8 +62,13 @@ def build_or_load_pi_ref(
     cache_dir: str | Path,
     batch_size: int = 16,
     context_size: int | None = None,
+    prompt_format: str = "flat",
 ) -> dict:
     """Compute π_ref(y=1|x) for every train+test row in every state, with caching.
+
+    `prompt_format` is "flat" (folktexts default completion-style) or "chat"
+    (wraps each row in the model's chat template via encode_row_prompt_chat).
+    The cache for each format is kept in a separate dir so both can coexist.
 
     Returns a nested dict:
       pi_ref[state]["train_p1"]  : np.ndarray (n_train,)
@@ -64,7 +76,9 @@ def build_or_load_pi_ref(
       pi_ref[state]["test_p1"]   : np.ndarray (n_test,)
       pi_ref[state]["test_y"]    : np.ndarray (n_test,)
     """
-    out_dir = cache_path(cache_dir, model_name)
+    if prompt_format not in ("flat", "chat"):
+        raise ValueError(f"prompt_format must be 'flat' or 'chat', got {prompt_format!r}")
+    out_dir = cache_path(cache_dir, model_name, prompt_format=prompt_format)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pi_ref: dict = {}
@@ -78,10 +92,18 @@ def build_or_load_pi_ref(
     if needs_model:
 
         model, tok = load_model_tokenizer(model_name)
+        encode_row = None
+        if prompt_format == "chat":
+            encode_row = partial(
+                encode_row_prompt_chat,
+                task=data.folktexts_dataset.task,
+                tokenizer=tok,
+            )
         clf = TransformersLLMClassifier(
             model=model,
             tokenizer=tok,
             task=data.folktexts_dataset.task,
+            encode_row=encode_row,
             batch_size=batch_size,
             correct_order_bias=False, #make true to use the order correcting bias
         )

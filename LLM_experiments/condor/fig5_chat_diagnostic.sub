@@ -1,0 +1,38 @@
+# Fig.5 chat-prompt diagnostic.
+#
+# Runs POLICY=static once with PROMPT_FORMAT=chat so we can compare
+# per-state π_ref accuracy under the model's chat template against the
+# default folktexts flat-completion prompt.
+#
+# Submit:
+#   condor_submit_bid 15 LLM_experiments/condor/fig5_chat_diagnostic.sub
+#
+# π_ref under PROMPT_FORMAT=chat is cached separately at
+#   $PI_REF_DIR/Qwen--Qwen2.5-0.5B-Instruct__chat/
+# so the existing flat-prompt cache is left untouched. The first run will
+# pay the full LLM-forward cost over the train+test pool to populate it.
+
+universe          = vanilla
+executable        = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/run_one.sh
+arguments         = $(tag) $(policy) $(beta) $(seed)
+
+request_cpus      = 4
+request_memory    = 32G
+request_disk      = 30G
+request_gpus      = 1
+requirements      = (TARGET.CUDAGlobalMemoryMb >= 24000)
+
+getenv            = False
+environment       = "HF_HOME=/is/cluster/gsmithline/.cache/huggingface REPO=/home/gsmithline/evolutionary-prediction-games CONDA_SH=/home/gsmithline/miniconda3/etc/profile.d/conda.sh ENV_NAME=opdyn WANDB_KEY_FILE=/home/gsmithline/.wandb_key WANDB_PROJECT=epg-llm-fig5 PROMPT_FORMAT=chat T=200 N_PER_STEP=1000 N_TEST_PER_STATE=5000 BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct DATA_DIR=/is/cluster/gsmithline/folktexts_data PI_REF_DIR=/is/cluster/gsmithline/folktexts_pi_ref"
+
+output            = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).out
+error             = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).err
+log               = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).log
+
+notification      = Complete
+notify_user       = gabriel.smithline@tue.ellis.eu
+
+max_retries       = 1
+on_exit_hold      = (ExitCode =!= 0)
+
+queue tag, policy, beta, seed from LLM_experiments/condor/configs_fig5_chat_diagnostic.txt

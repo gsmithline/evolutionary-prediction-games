@@ -41,6 +41,7 @@ env \
     SEED="$SEED" \
     T="$T" \
     N_PER_STEP="$N_PER_STEP" \
+    N_TEST_PER_STATE="${N_TEST_PER_STATE:-5000}" \
     BASE_MODEL="$BASE_MODEL" \
     DATA_DIR="$DATA_DIR" \
     PI_REF_DIR="$PI_REF_DIR" \
@@ -49,6 +50,8 @@ env \
     BATCH_SIZE="${BATCH_SIZE:-4}" \
     GRAD_ACCUM="${GRAD_ACCUM:-1}" \
     OPTIMIZER="${OPTIMIZER:-adamw_torch}" \
+    INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-64}" \
+    PROMPT_FORMAT="${PROMPT_FORMAT:-flat}" \
     WANDB_PROJECT="${WANDB_PROJECT:-epg-llm-fig5}" \
     WANDB_DIR="${WANDB_DIR:-$REPO/wandb}" \
     python -m LLM_experiments.run_fig5
