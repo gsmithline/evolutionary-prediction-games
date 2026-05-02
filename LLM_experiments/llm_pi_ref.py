@@ -1,29 +1,41 @@
 """One-shot caching of base-LLM π_ref scores for ACSIncome rows.
 
-We score every train+test row in the per-state pools once with the base LLM
-through folktexts' QA interface. Replicator-time policies (Static and
-ClosedForm) read from this cache instead of re-querying the LLM each step.
+We score every row in the per-state pools once with the base LLM through
+folktexts' QA interface. Replicator-time policies (Static and ClosedForm) read
+from this cache instead of re-querying the LLM each step.
 
-Cache layout:
+Cache layout (current, position-indexed):
   cache_dir/
     {model_slug}[__chat]/
-      {state}_train_p1.npy  # P(y=1 | x) under base LLM, shape (n_train,)
-      {state}_train_y.npy   # ground-truth binary label, shape (n_train,)
-      {state}_test_p1.npy
-      {state}_test_y.npy
+      {state}_full_p1.npy   # shape (state_size,), p1 indexed by state-row position
+      {state}_full_y.npy    # shape (state_size,), y  indexed by state-row position
 
-The `__chat` suffix marks caches built with `prompt_format="chat"` (uses the
-model's chat template via folktexts.encode_row_prompt_chat). The default
+The `__chat` suffix marks caches built with `prompt_format="chat"`. Default
 `prompt_format="flat"` matches folktexts' default flat completion-style prompt.
+
+Indexing by state-row position (0 .. state_size-1, where state-row position
+is the row's location in the unpermuted per-state ACS DataFrame) makes the
+cache invariant to N_TEST_PER_STATE / max_train_per_state at run time:
+slicing into the cache is done by `data.train_pos[state]` /
+`data.test_pos[state]` which encode the partition for the current run.
+
+Legacy layout (kept readable for one-time migration):
+  {state}_train_p1.npy / {state}_train_y.npy / {state}_test_p1.npy / {state}_test_y.npy
+were ordered by the partition that was active when the cache was built —
+specifically the values were laid out as [old_train_rows ++ old_test_rows] in
+the order produced by `_state_pool_concat`. Migration reverses that using the
+deterministic PARTITION_SEED + per-state size to recover the position-indexed
+arrays without re-running the LLM.
 """
 from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+import sys
 import numpy as np
 import pandas as pd
 
-from .data import STATES, ACSIncome3State
+from .data import STATES, ACSIncome3State, PARTITION_SEED
 from . import _folktexts_compat  # noqa: F401  — patches folktexts vocab-size bug
 from folktexts.llm_utils import load_model_tokenizer
 from folktexts.classifier import TransformersLLMClassifier
@@ -39,12 +51,13 @@ def cache_path(cache_dir: str | Path, model_name: str, prompt_format: str = "fla
     return Path(cache_dir) / (_slug(model_name) + suffix)
 
 
-def _state_pool_concat(data: ACSIncome3State, state: str) -> tuple[pd.DataFrame, np.ndarray]:
-    """Return (X_concat, y_concat) covering both train and test pool for a state.
+def _state_pool_concat(data: ACSIncome3State, state: str) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """Return (X_concat, y_concat, pos_concat) covering the full state.
 
-    Train rows are scored first (positions 0 .. n_train-1), then test rows. We
-    return per-pool numpy arrays separately on the loader side; this helper
-    just concatenates for one batched LLM pass.
+    Rows are train rows first (in train DataFrame order) then test rows (in
+    test DataFrame order). `pos_concat[i]` gives the state-row position of
+    each row, used to write the LLM-scored p1 back into a position-indexed
+    full-state array.
     """
     train = data.train[state]
     test = data.test[state]
@@ -53,7 +66,55 @@ def _state_pool_concat(data: ACSIncome3State, state: str) -> tuple[pd.DataFrame,
         train[data.target_col].astype(int).values,
         test[data.target_col].astype(int).values,
     ])
-    return df, y
+    pos = np.concatenate([data.train_pos[state], data.test_pos[state]])
+    return df, y, pos
+
+
+def _migrate_legacy_cache(out_dir: Path) -> bool:
+    """If a legacy split cache exists, rewrite it as the position-indexed format.
+
+    Reverses the OLD partition (PARTITION_SEED + len(sub) inferred from cache
+    sizes) and lays the cached values into one full-state array per state.
+    Writes new files alongside the legacy ones. Returns True on success.
+
+    Assumes the legacy cache was built with `max_train_per_state=None`
+    (i.e. n_old_test + n_old_train == state_size). If sizes don't add up
+    consistently across states, returns False and the caller falls back to a
+    fresh LLM build.
+    """
+    legacy_kinds = ("train_p1", "train_y", "test_p1", "test_y")
+    have_legacy = all(
+        (out_dir / f"{state}_{kind}.npy").exists()
+        for state in STATES for kind in legacy_kinds
+    )
+    if not have_legacy:
+        return False
+
+    rng = np.random.default_rng(PARTITION_SEED)
+    for state in STATES:
+        train_p1 = np.load(out_dir / f"{state}_train_p1.npy")
+        train_y = np.load(out_dir / f"{state}_train_y.npy")
+        test_p1 = np.load(out_dir / f"{state}_test_p1.npy")
+        test_y = np.load(out_dir / f"{state}_test_y.npy")
+        n_old_test = len(test_p1)
+        n_old_train = len(train_p1)
+        state_size = n_old_test + n_old_train
+
+        # Reproduce the OLD partition's permutation.
+        idx_old = rng.permutation(state_size)
+
+        full_p1 = np.empty(state_size, dtype=np.float64)
+        full_y = np.empty(state_size, dtype=np.int64)
+        full_p1[idx_old[:n_old_test]] = test_p1
+        full_p1[idx_old[n_old_test:n_old_test + n_old_train]] = train_p1
+        full_y[idx_old[:n_old_test]] = test_y.astype(np.int64)
+        full_y[idx_old[n_old_test:n_old_test + n_old_train]] = train_y.astype(np.int64)
+
+        np.save(out_dir / f"{state}_full_p1.npy", full_p1)
+        np.save(out_dir / f"{state}_full_y.npy", full_y)
+        print(f"[pi_ref] migrated legacy cache for {state}: state_size={state_size} "
+              f"(n_test_old={n_old_test}, n_train_old={n_old_train})", file=sys.stderr)
+    return True
 
 
 def build_or_load_pi_ref(
@@ -64,81 +125,74 @@ def build_or_load_pi_ref(
     context_size: int | None = None,
     prompt_format: str = "flat",
 ) -> dict:
-    """Compute π_ref(y=1|x) for every train+test row in every state, with caching.
+    """Compute / load full-state-indexed π_ref(y=1|x) per state, with caching.
 
-    `prompt_format` is "flat" (folktexts default completion-style) or "chat"
-    (wraps each row in the model's chat template via encode_row_prompt_chat).
-    The cache for each format is kept in a separate dir so both can coexist.
+    Returns:
+      pi_ref[state]["full_p1"] : np.ndarray (state_size,) float64,
+                                 indexed by state-row position
+      pi_ref[state]["full_y"]  : np.ndarray (state_size,) int64
 
-    Returns a nested dict:
-      pi_ref[state]["train_p1"]  : np.ndarray (n_train,)
-      pi_ref[state]["train_y"]   : np.ndarray (n_train,)
-      pi_ref[state]["test_p1"]   : np.ndarray (n_test,)
-      pi_ref[state]["test_y"]    : np.ndarray (n_test,)
+    Slicing for the current run's train/test partition is done at consumer
+    sites via `data.train_pos[state]` and `data.test_pos[state]`.
     """
     if prompt_format not in ("flat", "chat"):
         raise ValueError(f"prompt_format must be 'flat' or 'chat', got {prompt_format!r}")
     out_dir = cache_path(cache_dir, model_name, prompt_format=prompt_format)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pi_ref: dict = {}
-    needs_model = any(
-        not (out_dir / f"{state}_train_p1.npy").exists()
-        or not (out_dir / f"{state}_test_p1.npy").exists()
+    have_full = all(
+        (out_dir / f"{state}_full_p1.npy").exists()
+        and (out_dir / f"{state}_full_y.npy").exists()
         for state in STATES
     )
+    if not have_full:
+        # Try one-time migration from the legacy split cache before invoking the LLM.
+        have_full = _migrate_legacy_cache(out_dir)
 
-    clf = None
-    if needs_model:
+    pi_ref: dict = {}
+    if have_full:
+        for state in STATES:
+            full_p1 = np.load(out_dir / f"{state}_full_p1.npy")
+            full_y = np.load(out_dir / f"{state}_full_y.npy")
+            if len(full_p1) != data.state_size[state]:
+                raise RuntimeError(
+                    f"Cache size mismatch for {state}: cache has {len(full_p1)} entries "
+                    f"but data has state_size={data.state_size[state]}. "
+                    f"Delete the cache dir to force rebuild."
+                )
+            pi_ref[state] = {"full_p1": full_p1, "full_y": full_y.astype(np.int64)}
+        return pi_ref
 
-        model, tok = load_model_tokenizer(model_name)
-        encode_row = None
-        if prompt_format == "chat":
-            encode_row = partial(
-                encode_row_prompt_chat,
-                task=data.folktexts_dataset.task,
-                tokenizer=tok,
-            )
-        clf = TransformersLLMClassifier(
-            model=model,
-            tokenizer=tok,
+    # Fresh build: score the full state pool once.
+    model, tok = load_model_tokenizer(model_name)
+    encode_row = None
+    if prompt_format == "chat":
+        encode_row = partial(
+            encode_row_prompt_chat,
             task=data.folktexts_dataset.task,
-            encode_row=encode_row,
-            batch_size=batch_size,
-            correct_order_bias=False, #make true to use the order correcting bias
+            tokenizer=tok,
         )
+    clf = TransformersLLMClassifier(
+        model=model,
+        tokenizer=tok,
+        task=data.folktexts_dataset.task,
+        encode_row=encode_row,
+        batch_size=batch_size,
+        correct_order_bias=False,
+    )
 
     for state in STATES:
-        train_p1_path = out_dir / f"{state}_train_p1.npy"
-        train_y_path = out_dir / f"{state}_train_y.npy"
-        test_p1_path = out_dir / f"{state}_test_p1.npy"
-        test_y_path = out_dir / f"{state}_test_y.npy"
-
-        if all(p.exists() for p in (train_p1_path, train_y_path, test_p1_path, test_y_path)):
-            pi_ref[state] = {
-                "train_p1": np.load(train_p1_path),
-                "train_y": np.load(train_y_path),
-                "test_p1": np.load(test_p1_path),
-                "test_y": np.load(test_y_path),
-            }
-            continue
-
-        df_concat, y_concat = _state_pool_concat(data, state)
-        n_train = len(data.train[state])
-
+        df_concat, y_concat, pos_concat = _state_pool_concat(data, state)
         risk = clf.predict_proba(df_concat)  # (n, 2): [P(neg), P(pos)]
         p1 = risk[:, 1].astype(np.float64)
 
-        np.save(train_p1_path, p1[:n_train])
-        np.save(train_y_path, y_concat[:n_train].astype(np.int64))
-        np.save(test_p1_path, p1[n_train:])
-        np.save(test_y_path, y_concat[n_train:].astype(np.int64))
+        full_p1 = np.empty(data.state_size[state], dtype=np.float64)
+        full_y = np.empty(data.state_size[state], dtype=np.int64)
+        full_p1[pos_concat] = p1
+        full_y[pos_concat] = y_concat.astype(np.int64)
 
-        pi_ref[state] = {
-            "train_p1": p1[:n_train],
-            "train_y": y_concat[:n_train].astype(np.int64),
-            "test_p1": p1[n_train:],
-            "test_y": y_concat[n_train:].astype(np.int64),
-        }
+        np.save(out_dir / f"{state}_full_p1.npy", full_p1)
+        np.save(out_dir / f"{state}_full_y.npy", full_y)
+        pi_ref[state] = {"full_p1": full_p1, "full_y": full_y}
 
     return pi_ref

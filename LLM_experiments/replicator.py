@@ -25,7 +25,10 @@ def _build_sample_pack(data: ACSIncome3State, pi_ref: dict, df, group_labels, wi
     for k, state in enumerate(STATES):
         mask = group_labels == k
         if mask.any():
-            p1[mask] = pi_ref[state]["train_p1"][within_state_idx[mask]]
+            # Map within-train-DataFrame index to original state-row position,
+            # then look up the position-indexed cached π_ref values.
+            state_pos = data.train_pos[state][within_state_idx[mask]]
+            p1[mask] = pi_ref[state]["full_p1"][state_pos]
     X = df[data.feature_cols].reset_index(drop=True)
     y = df[data.target_col].astype(int).values
     return SamplePack(X=X, y=y, pi_ref_p1=p1)
@@ -33,10 +36,11 @@ def _build_sample_pack(data: ACSIncome3State, pi_ref: dict, df, group_labels, wi
 
 def _build_test_pack(data: ACSIncome3State, pi_ref: dict, state: str) -> TestPack:
     pool = data.test[state]
+    test_pi_ref = pi_ref[state]["full_p1"][data.test_pos[state]]
     return TestPack(
         X=pool[data.feature_cols].reset_index(drop=True),
         y=pool[data.target_col].astype(int).values,
-        pi_ref_p1=pi_ref[state]["test_p1"],
+        pi_ref_p1=test_pi_ref,
     )
 
 

@@ -36,12 +36,20 @@ class ACSIncome3State:
 
     train[state] / test[state] are pd.DataFrames containing both the task
     features and the binary target column (target column name in `target_col`).
+
+    train_pos[state] / test_pos[state] are int64 arrays giving the *original
+    state-row position* (0 .. state_size[state]-1) for each row of the
+    train / test DataFrames. Used to look up cached π_ref values that are
+    indexed by state-row position rather than by the train/test split.
     """
     train: dict
     test: dict
     target_col: str
     feature_cols: list
     folktexts_dataset: object  # folktexts.acs.ACSDataset, kept for LLM scoring API
+    train_pos: dict = None
+    test_pos: dict = None
+    state_size: dict = None
 
 
 def load_acs_income_3state(
@@ -84,17 +92,24 @@ def load_acs_income_3state(
 
     train: dict = {}
     test: dict = {}
+    train_pos: dict = {}
+    test_pos: dict = {}
+    state_size: dict = {}
     for state in STATES:
         mask = state_codes == STATE_FIPS[state]
         sub = parsed.loc[mask].reset_index(drop=True)
         if len(sub) <= n_test_per_state:
             raise RuntimeError(f"Not enough rows for {state}: {len(sub)}")
         idx = rng.permutation(len(sub))
-        test[state] = sub.iloc[idx[:n_test_per_state]].reset_index(drop=True)
+        test_idx = idx[:n_test_per_state]
         train_idx = idx[n_test_per_state:]
         if max_train_per_state is not None:
             train_idx = train_idx[:max_train_per_state]
+        test[state] = sub.iloc[test_idx].reset_index(drop=True)
         train[state] = sub.iloc[train_idx].reset_index(drop=True)
+        test_pos[state] = np.asarray(test_idx, dtype=np.int64)
+        train_pos[state] = np.asarray(train_idx, dtype=np.int64)
+        state_size[state] = int(len(sub))
 
     return ACSIncome3State(
         train=train,
@@ -102,6 +117,9 @@ def load_acs_income_3state(
         target_col=target_col,
         feature_cols=feature_cols,
         folktexts_dataset=ds,
+        train_pos=train_pos,
+        test_pos=test_pos,
+        state_size=state_size,
     )
 
 

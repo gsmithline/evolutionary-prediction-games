@@ -142,8 +142,9 @@ def main():
     if wandb_mod is not None:
         baseline = {}
         for state in STATES:
-            p1 = pi_ref[state]["test_p1"]
-            y = pi_ref[state]["test_y"]
+            test_pos = data.test_pos[state]
+            p1 = pi_ref[state]["full_p1"][test_pos]
+            y = pi_ref[state]["full_y"][test_pos]
             pred = (p1 >= 0.5).astype(np.int64)
             baseline[f"baseline_pi_ref_acc/{state}"] = float((pred == y).mean())
         wandb_mod.log(baseline)
