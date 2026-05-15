@@ -1,0 +1,42 @@
+# HTCondor submit file for the SFT-trained sliver probe (small).
+#
+# Two trajectories at beta=1, T=200, seed=0:
+#   fig5_sft_sliver_baseline_b1_s0   (no filter, full sample n=1000)
+#   fig5_sft_sliver_WKHP_low_b1_s0   (filter WKHP<=30 -- the slicer that
+#                                     produced the biggest closed_form effect)
+#
+# Asks the question: does gradient SFT-KL realize the closed_form steering
+# effect we observed (CA -> CA-TX coexistence under WKHP<=30)? Or does the
+# objective-form gap (SFT minimizes form I, closed_form is form II) prevent
+# SFT from reaching the geometric-mixture optimum?
+#
+# Resource sizing mirrors fig5.sub but with 48G CPU memory (full ACS PUMS
+# load) and T=200 instead of the default T=600.
+#
+# Submit:
+#   condor_submit_bid 15 LLM_experiments/condor/fig5_sliver_sft.sub
+
+universe          = vanilla
+executable        = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/run_one.sh
+arguments         = $(tag) $(policy) $(beta) $(seed)
+
+request_cpus      = 4
+request_memory    = 48G
+request_disk      = 30G
+request_gpus      = 1
+requirements      = (TARGET.CUDAGlobalMemoryMb >= 24000)
+
+getenv            = False
+environment       = "HF_HOME=/is/cluster/gsmithline/.cache/huggingface REPO=/home/gsmithline/evolutionary-prediction-games CONDA_SH=/home/gsmithline/miniconda3/etc/profile.d/conda.sh ENV_NAME=opdyn WANDB_KEY_FILE=/home/gsmithline/.wandb_key WANDB_PROJECT=epg-llm-fig5 T=200 N_PER_STEP=$(n_per_step) TRAIN_FILTER=$(train_filter) BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct SFT_EPOCHS=1 BATCH_SIZE=4 GRAD_ACCUM=1 OPTIMIZER=adamw_torch DATA_DIR=/is/cluster/gsmithline/folktexts_data PI_REF_DIR=/is/cluster/gsmithline/folktexts_pi_ref"
+
+output            = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).out
+error             = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).err
+log               = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).log
+
+notification      = Complete
+notify_user       = gabriel.smithline@tue.ellis.eu
+
+max_retries       = 1
+on_exit_hold      = (ExitCode =!= 0)
+
+queue tag, policy, beta, seed, n_per_step, train_filter from LLM_experiments/condor/configs_fig5_sliver_sft.txt

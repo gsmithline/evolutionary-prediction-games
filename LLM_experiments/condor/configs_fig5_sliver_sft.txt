@@ -1,0 +1,2 @@
+fig5_sft_sliver_baseline_b1_s0   sft  1.0  0  1000  none
+fig5_sft_sliver_WKHP_low_b1_s0   sft  1.0  0  1000  WKHP<=30
