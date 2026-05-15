@@ -20,7 +20,7 @@ executable        = /home/gsmithline/evolutionary-prediction-games/LLM_experimen
 arguments         = $(tag) $(policy) $(beta) $(seed)
 
 request_cpus      = 4
-request_memory    = 16G
+request_memory    = 48G
 request_disk      = 20G
 request_gpus      = 0
 
