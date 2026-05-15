@@ -37,8 +37,94 @@ except ImportError:
 
 from .data import K, STATES, load_acs_income_3state
 from .llm_pi_ref import build_or_load_pi_ref
-from .policies import StaticThresholdPolicy, ClosedFormPolicy, SFTPolicy, RLKLPolicy
+from .policies import SamplePack, StaticThresholdPolicy, ClosedFormPolicy, SFTPolicy, RLKLPolicy
 from .replicator import run_replicator
+
+
+# ---------------------------------------------------------------------------
+# TRAIN_FILTER: feature-predicate sliver wrapper.
+# Filters the population sample to rows matching the predicate before fit().
+# Per-state evaluation is unaffected. Used to test whether feature-targeted
+# SFT/closed_form training produces emergent state-asymmetric population
+# steering through feature-state correlations in the data.
+# ---------------------------------------------------------------------------
+
+def _parse_train_filter(spec: str):
+    """Parse a simple feature predicate like 'WKHP>40' or 'AGEP>=50'.
+
+    Returns a callable (df) -> bool ndarray of len(df), or None when spec is empty.
+    Supported operators (longest-match first): >=, <=, ==, >, <.
+    Also treats 'none', '_', '__none__' (case-insensitive) as None, so condor
+    configs can pass an explicit no-filter value when needed.
+    """
+    spec = (spec or "").strip()
+    if not spec or spec.lower() in ("none", "_", "__none__"):
+        return None
+    for op_str, op_fn in [
+        (">=", lambda a, b: a >= b),
+        ("<=", lambda a, b: a <= b),
+        ("==", lambda a, b: a == b),
+        (">",  lambda a, b: a >  b),
+        ("<",  lambda a, b: a <  b),
+    ]:
+        if op_str in spec:
+            col, val = spec.split(op_str, 1)
+            col = col.strip()
+            try:
+                val = float(val.strip())
+            except ValueError:
+                raise ValueError(f"TRAIN_FILTER value must be numeric; got spec={spec!r}")
+
+            def _f(df, col=col, val=val, op_fn=op_fn):
+                arr = df[col].to_numpy()
+                return op_fn(arr, val)
+
+            _f._spec = spec
+            return _f
+    raise ValueError(
+        f"TRAIN_FILTER spec {spec!r} did not match any of >=, <=, ==, >, <."
+    )
+
+
+class FilteredPolicy:
+    """Wraps a policy so its fit() sees only rows matching a feature predicate.
+
+    score() delegates unchanged so per-state evaluation is uniform across
+    conditions. threshold property is passed through for static-style policies.
+    """
+    def __init__(self, base, filter_fn):
+        self.base = base
+        self.filter = filter_fn
+        self.name = f"{base.name}_filtered"
+        self._round = 0
+
+    def fit(self, sample):
+        self._round += 1
+        if self.filter is None:
+            self.base.fit(sample)
+            return
+        mask = np.asarray(self.filter(sample.X)).astype(bool)
+        n_total = int(len(mask))
+        n_in = int(mask.sum())
+        spec = getattr(self.filter, "_spec", "<filter>")
+        pct = (100.0 * n_in / n_total) if n_total else 0.0
+        print(f"[filter] round={self._round} spec={spec!r}  kept={n_in}/{n_total} ({pct:.1f}%)")
+        if n_in == 0:
+            print(f"[filter] WARNING: empty subset; keeping previous policy state, no fit this round")
+            return
+        filtered = SamplePack(
+            X=sample.X.loc[mask].reset_index(drop=True),
+            y=sample.y[mask],
+            pi_ref_p1=sample.pi_ref_p1[mask],
+        )
+        self.base.fit(filtered)
+
+    def score(self, test):
+        return self.base.score(test)
+
+    @property
+    def threshold(self):
+        return getattr(self.base, "threshold", None)
 
 
 def _init_wandb(config: dict, run_tag: str):
@@ -180,6 +266,14 @@ def main():
     else:
         print(f"[run_fig5] unknown POLICY={policy_kind}", file=sys.stderr)
         sys.exit(2)
+
+    # Optional TRAIN_FILTER wrapper: feature-predicate sliver.
+    train_filter_spec = os.environ.get("TRAIN_FILTER", "")
+    train_filter = _parse_train_filter(train_filter_spec)
+    if train_filter is not None:
+        print(f"[run_fig5] TRAIN_FILTER={train_filter_spec!r}  (policy wrapped in FilteredPolicy)")
+        policy = FilteredPolicy(policy, train_filter)
+        config["train_filter"] = train_filter_spec
 
     def wandb_step_log(step_record: dict) -> None:
         if wandb_mod is None:

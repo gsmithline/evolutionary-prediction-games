@@ -1,0 +1,5 @@
+fig5_cf_sliver_baseline_b1_s0          closed_form  1.0  0  1000  none
+fig5_cf_sliver_baseline_matchedN_b1_s0 closed_form  1.0  0  300   none
+fig5_cf_sliver_WKHP_high_b1_s0         closed_form  1.0  0  1000  WKHP>40
+fig5_cf_sliver_WKHP_low_b1_s0          closed_form  1.0  0  1000  WKHP<=30
+fig5_cf_sliver_AGEP_old_b1_s0          closed_form  1.0  0  1000  AGEP>=50

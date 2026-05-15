@@ -52,6 +52,7 @@ env \
     OPTIMIZER="${OPTIMIZER:-adamw_torch}" \
     INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-64}" \
     PROMPT_FORMAT="${PROMPT_FORMAT:-flat}" \
+    TRAIN_FILTER="${TRAIN_FILTER:-}" \
     WANDB_PROJECT="${WANDB_PROJECT:-epg-llm-fig5}" \
     WANDB_DIR="${WANDB_DIR:-$REPO/wandb}" \
     python -m LLM_experiments.run_fig5

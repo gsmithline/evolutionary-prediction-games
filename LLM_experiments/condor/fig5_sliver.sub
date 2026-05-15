@@ -1,0 +1,40 @@
+# HTCondor submit file for the EPG sliver experiment.
+#
+# Tests whether targeted SFT/closed_form training on a feature-defined subset
+# of the population sample produces emergent state-asymmetric population
+# steering through feature-state correlations in the ACSIncome data.
+#
+# This sub file's queue line uses TWO extra columns vs fig5.sub:
+#   n_per_step (int)        — supports the matched-N control
+#   train_filter (string)   — feature predicate, or "none" for no filter
+#
+# All conditions in configs_fig5_sliver.txt run closed_form (CPU-only); we don't
+# request a GPU. T=200 is the standard EPG length and finishes in minutes for
+# closed_form.
+#
+# Submit:
+#   condor_submit_bid 15 LLM_experiments/condor/fig5_sliver.sub
+
+universe          = vanilla
+executable        = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/run_one.sh
+arguments         = $(tag) $(policy) $(beta) $(seed)
+
+request_cpus      = 4
+request_memory    = 16G
+request_disk      = 20G
+request_gpus      = 0
+
+getenv            = False
+environment       = "HF_HOME=/is/cluster/gsmithline/.cache/huggingface REPO=/home/gsmithline/evolutionary-prediction-games CONDA_SH=/home/gsmithline/miniconda3/etc/profile.d/conda.sh ENV_NAME=opdyn WANDB_KEY_FILE=/home/gsmithline/.wandb_key WANDB_PROJECT=epg-llm-fig5 T=200 N_PER_STEP=$(n_per_step) TRAIN_FILTER=$(train_filter) BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct DATA_DIR=/is/cluster/gsmithline/folktexts_data PI_REF_DIR=/is/cluster/gsmithline/folktexts_pi_ref"
+
+output            = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).out
+error             = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).err
+log               = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).log
+
+notification      = Complete
+notify_user       = gabriel.smithline@tue.ellis.eu
+
+max_retries       = 1
+on_exit_hold      = (ExitCode =!= 0)
+
+queue tag, policy, beta, seed, n_per_step, train_filter from LLM_experiments/condor/configs_fig5_sliver.txt
