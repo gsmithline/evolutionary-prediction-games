@@ -122,9 +122,14 @@ class FilteredPolicy:
     def score(self, test):
         return self.base.score(test)
 
-    @property
-    def threshold(self):
-        return getattr(self.base, "threshold", None)
+    # Forward attribute access (e.g. .threshold for StaticThresholdPolicy) to
+    # the wrapped base; raise AttributeError when base doesn't have it so the
+    # replicator's `hasattr(policy, "threshold")` check works correctly for
+    # bases that lack a threshold (e.g. ClosedFormPolicy).
+    def __getattr__(self, name):
+        if name.startswith("_") or name in ("base", "filter"):
+            raise AttributeError(name)
+        return getattr(self.base, name)
 
 
 def _init_wandb(config: dict, run_tag: str):
