@@ -1,0 +1,45 @@
+# HTCondor submit file for the SFT-trained sliver probe -- beta sweep.
+#
+# Four trajectories at T=200, seed=0, extending fig5_sliver_sft.sub (which
+# covered beta=1) with beta=3 and beta=10:
+#   fig5_sft_sliver_baseline_b3_s0    (no filter, beta=3)
+#   fig5_sft_sliver_WKHP_low_b3_s0    (WKHP<=30,  beta=3)
+#   fig5_sft_sliver_baseline_b10_s0   (no filter, beta=10)
+#   fig5_sft_sliver_WKHP_low_b10_s0   (WKHP<=30,  beta=10)
+#
+# Asks: does stronger KL anchoring (beta>1) prevent the SFT collapse to a
+# constant y=0 classifier we observed on the WKHP<=30 sliver at beta=1?
+# If yes, the WKHP_low trajectory should approach the cf-predicted CA-TX
+# coexistence (or stay in the CA basin); if beta is too strong, all three
+# states' accuracies should converge toward the pi_ref-induced values and
+# the trajectory should flatten near the initial 1/3-1/3-1/3.
+#
+# Resource sizing mirrors fig5_sliver_sft.sub.
+#
+# Submit:
+#   condor_submit_bid 15 LLM_experiments/condor/fig5_sliver_sft_betasweep.sub
+
+universe          = vanilla
+executable        = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/run_one.sh
+arguments         = $(tag) $(policy) $(beta) $(seed)
+
+request_cpus      = 4
+request_memory    = 48G
+request_disk      = 30G
+request_gpus      = 1
+requirements      = (TARGET.CUDAGlobalMemoryMb >= 24000)
+
+getenv            = False
+environment       = "HF_HOME=/is/cluster/gsmithline/.cache/huggingface REPO=/home/gsmithline/evolutionary-prediction-games CONDA_SH=/home/gsmithline/miniconda3/etc/profile.d/conda.sh ENV_NAME=opdyn WANDB_KEY_FILE=/home/gsmithline/.wandb_key WANDB_PROJECT=epg-llm-fig5 T=200 N_PER_STEP=$(n_per_step) TRAIN_FILTER=$(train_filter) BASE_MODEL=Qwen/Qwen2.5-0.5B-Instruct SFT_EPOCHS=1 BATCH_SIZE=4 GRAD_ACCUM=1 OPTIMIZER=adamw_torch DATA_DIR=/is/cluster/gsmithline/folktexts_data PI_REF_DIR=/is/cluster/gsmithline/folktexts_pi_ref"
+
+output            = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).out
+error             = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).err
+log               = /home/gsmithline/evolutionary-prediction-games/LLM_experiments/condor/logs/$(tag).log
+
+notification      = Complete
+notify_user       = gabriel.smithline@tue.ellis.eu
+
+max_retries       = 1
+on_exit_hold      = (ExitCode =!= 0)
+
+queue tag, policy, beta, seed, n_per_step, train_filter from LLM_experiments/condor/configs_fig5_sliver_sft_betasweep.txt
